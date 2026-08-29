@@ -115,6 +115,7 @@ pub(crate) enum DesktopAction {
     SetDictationShortcut(DesktopShortcut),
     SetDoubleTapLock(bool),
     SetDoubleTapOnly(bool),
+    SetSinglePressToggle(bool),
     StartListening,
     StopListening,
 }

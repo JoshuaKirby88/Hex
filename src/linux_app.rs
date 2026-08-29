@@ -991,6 +991,11 @@ impl DesktopHost for LinuxDesktopHost {
                     "double-tap-only is unavailable on X11"
                 ));
             }
+            DesktopAction::SetSinglePressToggle(_) => {
+                return Err(color_eyre::eyre::eyre!(
+                    "single-press toggle is unavailable on Linux"
+                ));
+            }
             DesktopAction::StartListening => {
                 self.error = None;
                 self.dismissed_failure_at = self.activity.last_failure.as_ref().map(|(at, _)| *at);

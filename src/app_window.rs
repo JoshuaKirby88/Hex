@@ -639,6 +639,8 @@ enum ApplicationCatalogState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HotkeyKind {
     Dictation,
+    Cancel,
+    Model,
     Edit,
     PasteLast,
 }
@@ -804,8 +806,8 @@ pub struct AppWindow {
     hotkey_capture: HotkeyCaptureState,
     hotkey_capture_animation: ToggleSpring,
     hotkey_width_spring: ToggleSpring,
-    hotkey_side_animations: [ToggleSpring; 3],
-    hotkey_side_selection_springs: [ToggleSpring; 3],
+    hotkey_side_animations: [ToggleSpring; 5],
+    hotkey_side_selection_springs: [ToggleSpring; 5],
     window_focus: FocusHandle,
     hotkey_focus: FocusHandle,
     _hotkey_blur_subscription: Subscription,
@@ -1240,6 +1242,22 @@ impl AppWindow {
             hotkey_width_spring: ToggleSpring::at(HOTKEY_MIN_WIDTH),
             hotkey_side_animations: [
                 ToggleSpring::new(standalone_modifier_side(&settings.dictation_hotkey).is_some()),
+                ToggleSpring::new(
+                    settings
+                        .cancel_hotkey
+                        .as_ref()
+                        .and_then(standalone_modifier_side)
+                        .is_some(),
+                ),
+                ToggleSpring::new(
+                    settings
+                        .model_hotkeys
+                        .iter()
+                        .find(|binding| binding.selection == settings.transcription)
+                        .map(|binding| &binding.hotkey)
+                        .and_then(standalone_modifier_side)
+                        .is_some(),
+                ),
                 ToggleSpring::new(standalone_modifier_side(&settings.edit_hotkey).is_some()),
                 ToggleSpring::new(
                     settings
@@ -1252,6 +1270,22 @@ impl AppWindow {
             hotkey_side_selection_springs: [
                 ToggleSpring::at(hotkey_side_index(
                     standalone_modifier_side(&settings.dictation_hotkey)
+                        .unwrap_or(ModifierSide::Either),
+                ) as f32),
+                ToggleSpring::at(hotkey_side_index(
+                    settings
+                        .cancel_hotkey
+                        .as_ref()
+                        .and_then(standalone_modifier_side)
+                        .unwrap_or(ModifierSide::Either),
+                ) as f32),
+                ToggleSpring::at(hotkey_side_index(
+                    settings
+                        .model_hotkeys
+                        .iter()
+                        .find(|binding| binding.selection == settings.transcription)
+                        .map(|binding| &binding.hotkey)
+                        .and_then(standalone_modifier_side)
                         .unwrap_or(ModifierSide::Either),
                 ) as f32),
                 ToggleSpring::at(hotkey_side_index(
@@ -2354,6 +2388,15 @@ impl AppWindow {
     ) -> AnyElement {
         let binding = match kind {
             HotkeyKind::Dictation => &self.settings.dictation_hotkey,
+            HotkeyKind::Cancel => self
+                .settings
+                .cancel_hotkey
+                .as_ref()
+                .unwrap_or(&self.settings.dictation_hotkey),
+            HotkeyKind::Model => self
+                .model_hotkey_binding()
+                .map(|binding| &binding.hotkey)
+                .unwrap_or(&self.settings.dictation_hotkey),
             HotkeyKind::Edit => &self.settings.edit_hotkey,
             HotkeyKind::PasteLast => self
                 .settings
@@ -2363,6 +2406,14 @@ impl AppWindow {
         };
         let binding_keycaps = match kind {
             HotkeyKind::Dictation => self.snapshot().dictation_shortcut,
+            HotkeyKind::Cancel => self
+                .settings
+                .cancel_hotkey
+                .as_ref()
+                .map_or_else(|| vec!["Off".into()], HotkeyBinding::keycaps),
+            HotkeyKind::Model => self
+                .model_hotkey_binding()
+                .map_or_else(|| vec!["Off".into()], |binding| binding.hotkey.keycaps()),
             HotkeyKind::Edit => binding.keycaps(),
             HotkeyKind::PasteLast => self
                 .settings
@@ -2462,6 +2513,8 @@ impl AppWindow {
                         div()
                             .id(match kind {
                                 HotkeyKind::Dictation => "cancel-dictation-hotkey-capture",
+                                HotkeyKind::Cancel => "cancel-cancel-hotkey-capture",
+                                HotkeyKind::Model => "cancel-model-hotkey-capture",
                                 HotkeyKind::Edit => "cancel-edit-hotkey-capture",
                                 HotkeyKind::PasteLast => "cancel-paste-last-hotkey-capture",
                             })
@@ -2515,6 +2568,8 @@ impl AppWindow {
         div()
             .id(match kind {
                 HotkeyKind::Dictation => "dictation-hotkey-control",
+                HotkeyKind::Cancel => "cancel-hotkey-control",
+                HotkeyKind::Model => "model-hotkey-control",
                 HotkeyKind::Edit => "edit-hotkey-control",
                 HotkeyKind::PasteLast => "paste-last-hotkey-control",
             })
@@ -2647,6 +2702,8 @@ impl AppWindow {
     fn hotkey_binding(&self, kind: HotkeyKind) -> Option<&HotkeyBinding> {
         match kind {
             HotkeyKind::Dictation => Some(&self.settings.dictation_hotkey),
+            HotkeyKind::Cancel => self.settings.cancel_hotkey.as_ref(),
+            HotkeyKind::Model => self.model_hotkey_binding().map(|binding| &binding.hotkey),
             HotkeyKind::Edit => Some(&self.settings.edit_hotkey),
             HotkeyKind::PasteLast => self.settings.paste_last_hotkey.as_ref(),
         }
@@ -2655,9 +2712,26 @@ impl AppWindow {
     fn hotkey_binding_mut(&mut self, kind: HotkeyKind) -> Option<&mut HotkeyBinding> {
         match kind {
             HotkeyKind::Dictation => Some(&mut self.settings.dictation_hotkey),
+            HotkeyKind::Cancel => self.settings.cancel_hotkey.as_mut(),
+            HotkeyKind::Model => {
+                let index = self.model_hotkey_binding_index()?;
+                Some(&mut self.settings.model_hotkeys[index].hotkey)
+            }
             HotkeyKind::Edit => Some(&mut self.settings.edit_hotkey),
             HotkeyKind::PasteLast => self.settings.paste_last_hotkey.as_mut(),
         }
+    }
+
+    fn model_hotkey_binding_index(&self) -> Option<usize> {
+        self.settings
+            .model_hotkeys
+            .iter()
+            .position(|binding| binding.selection == self.settings.transcription)
+    }
+
+    fn model_hotkey_binding(&self) -> Option<&crate::app_settings::ModelHotkeyBinding> {
+        self.model_hotkey_binding_index()
+            .map(|index| &self.settings.model_hotkeys[index])
     }
 
     fn begin_hotkey_capture(
@@ -2690,14 +2764,15 @@ impl AppWindow {
     }
 
     fn capture_hotkey_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        if !self.hotkey_capture.is_listening() {
-            return;
-        }
+        let kind = match self.hotkey_capture {
+            HotkeyCaptureState::Listening { kind, .. } => kind,
+            HotkeyCaptureState::Idle | HotkeyCaptureState::Saved { .. } => return,
+        };
         cx.stop_propagation();
         if event.is_held {
             return;
         }
-        if event.keystroke.key == "escape" {
+        if event.keystroke.key == "escape" && kind != HotkeyKind::Cancel {
             self.cancel_hotkey_capture(cx);
             return;
         }
@@ -2709,7 +2784,7 @@ impl AppWindow {
                 return;
             }
         };
-        if modifiers.is_empty() && !is_function_key(&key.label) {
+        if modifiers.is_empty() && !is_function_key(&key.label) && kind != HotkeyKind::Cancel {
             self.set_hotkey_capture_message("Add a modifier", cx);
             return;
         }
@@ -2789,6 +2864,10 @@ impl AppWindow {
             HotkeyCaptureState::Listening { kind, .. } => kind,
             HotkeyCaptureState::Idle | HotkeyCaptureState::Saved { .. } => return,
         };
+        if kind == HotkeyKind::Cancel && binding.key.is_none() {
+            self.set_hotkey_capture_message("Add a key", cx);
+            return;
+        }
         if hotkey_binding_conflicts(&self.settings, kind, &binding) {
             self.set_hotkey_capture_message("Already in use", cx);
             return;
@@ -2798,6 +2877,19 @@ impl AppWindow {
             .set_target(hotkey_saved_width(binding.keycaps().len()));
         match kind {
             HotkeyKind::Dictation => self.settings.dictation_hotkey = binding,
+            HotkeyKind::Cancel => self.settings.cancel_hotkey = Some(binding),
+            HotkeyKind::Model => {
+                if let Some(index) = self.model_hotkey_binding_index() {
+                    self.settings.model_hotkeys[index].hotkey = binding;
+                } else {
+                    self.settings
+                        .model_hotkeys
+                        .push(crate::app_settings::ModelHotkeyBinding {
+                            selection: self.settings.transcription.clone(),
+                            hotkey: binding,
+                        });
+                }
+            }
             HotkeyKind::Edit => {
                 self.settings.edit_hotkey = binding;
                 self.voice_action_inputs.error = None;
@@ -3184,6 +3276,8 @@ impl AppWindow {
     fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let permission_warnings = self.render_permission_warnings(cx);
         let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
+        let cancel_control = self.render_hotkey_control(HotkeyKind::Cancel, window, cx);
+        let model_hotkey_control = self.render_hotkey_control(HotkeyKind::Model, window, cx);
         let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
         let transcription_model = definition(self.settings.transcription.model);
         let transcription_label = format!(
@@ -3400,6 +3494,31 @@ impl AppWindow {
                                         transcription_control,
                                     ))
                                     .child(settings_row(
+                                        "Model shortcut",
+                                        format!(
+                                            "Records with {} in {}",
+                                            transcription_model.name,
+                                            language_name(&self.settings.transcription.language)
+                                        ),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(model_hotkey_control)
+                                            .child(
+                                                compact_button(if self.model_hotkey_binding().is_some() { "Disable" } else { "Enable" })
+                                                    .id("toggle-model-hotkey")
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        if let Some(index) = this.model_hotkey_binding_index() {
+                                                            this.settings.model_hotkeys.remove(index);
+                                                            this.save_settings(cx);
+                                                        } else {
+                                                            this.begin_hotkey_capture(HotkeyKind::Model, window, cx);
+                                                        }
+                                                    })),
+                                            ),
+                                    ))
+                                    .child(settings_row(
                                         "Microphone",
                                         "Automatically chooses the preferred available input",
                                         disclosure_button(microphone_label)
@@ -3436,6 +3555,47 @@ impl AppWindow {
                                                     ),
                                             ))
                                         },
+                                    )
+                                    .child(
+                                        settings_row(
+                                            "Single-press toggle",
+                                            "Press once to record, then press again to transcribe",
+                                            toggle(if self.settings.single_press_toggle { 1.0 } else { 0.0 }),
+                                        )
+                                        .id("single-press-toggle-setting")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let enabled = !this.settings.single_press_toggle;
+                                            if let Err(error) = this.dispatch(
+                                                DesktopAction::SetSinglePressToggle(enabled),
+                                            ) {
+                                                tracing::error!(%error, "could not update single-press toggle setting");
+                                            }
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .child(
+                                        settings_row(
+                                            "Cancel recording",
+                                            "Discards the active capture or newest unfinished dictation",
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(cancel_control)
+                                                .child(
+                                                    compact_button(if self.settings.cancel_hotkey.is_some() { "Disable" } else { "Enable" })
+                                                        .id("toggle-cancel-hotkey")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.settings.cancel_hotkey = if this.settings.cancel_hotkey.is_some() {
+                                                                None
+                                                            } else {
+                                                                Some(HotkeyBinding::cancel_default())
+                                                            };
+                                                            this.save_settings(cx);
+                                                        })),
+                                                ),
+                                        )
+                                        .id("cancel-hotkey-setting"),
                                     )
                                     .child(
                                         settings_row(
@@ -7272,6 +7432,23 @@ impl DesktopHost for AppWindow {
                 self.settings_dirty = false;
                 self.settings_load_error = None;
             }
+            DesktopAction::SetSinglePressToggle(enabled) => {
+                let mut candidate = self.settings.clone();
+                candidate.single_press_toggle = enabled;
+                if enabled {
+                    candidate.double_tap_lock = false;
+                    candidate.double_tap_only = false;
+                }
+                if !self.preview {
+                    candidate.save()?;
+                }
+                self.settings = candidate;
+                self.settings_save_generation = self.settings_save_generation.wrapping_add(1);
+                self.settings_dirty = false;
+                self.settings_load_error = None;
+                self.double_tap_toggle
+                    .set_enabled(self.settings.double_tap_lock);
+            }
         }
         Ok(())
     }
@@ -7516,8 +7693,10 @@ fn hotkey_idle_width(keycap_count: usize) -> f32 {
 const fn hotkey_kind_index(kind: HotkeyKind) -> usize {
     match kind {
         HotkeyKind::Dictation => 0,
-        HotkeyKind::Edit => 1,
-        HotkeyKind::PasteLast => 2,
+        HotkeyKind::Cancel => 1,
+        HotkeyKind::Model => 2,
+        HotkeyKind::Edit => 3,
+        HotkeyKind::PasteLast => 4,
     }
 }
 
@@ -7563,8 +7742,20 @@ fn hotkey_binding_conflicts(
 ) -> bool {
     let mut others = match kind {
         HotkeyKind::Dictation => Vec::new(),
-        HotkeyKind::Edit | HotkeyKind::PasteLast => vec![settings.dictation_hotkey.clone()],
+        HotkeyKind::Cancel | HotkeyKind::Model | HotkeyKind::Edit | HotkeyKind::PasteLast => {
+            vec![settings.dictation_hotkey.clone()]
+        }
     };
+    if kind != HotkeyKind::Cancel
+        && let Some(cancel) = &settings.cancel_hotkey
+    {
+        others.push(cancel.clone());
+    }
+    for model in &settings.model_hotkeys {
+        if kind != HotkeyKind::Model || model.selection != settings.transcription {
+            others.push(model.hotkey.clone());
+        }
+    }
     if kind != HotkeyKind::Edit && settings.voice_action.enabled {
         others.push(settings.edit_hotkey.clone());
     }
@@ -7586,6 +7777,14 @@ fn hotkey_side_binding(
 ) -> Option<HotkeyBinding> {
     let mut binding = match kind {
         HotkeyKind::Dictation => &settings.dictation_hotkey,
+        HotkeyKind::Cancel => settings.cancel_hotkey.as_ref()?,
+        HotkeyKind::Model => {
+            &settings
+                .model_hotkeys
+                .iter()
+                .find(|binding| binding.selection == settings.transcription)?
+                .hotkey
+        }
         HotkeyKind::Edit => &settings.edit_hotkey,
         HotkeyKind::PasteLast => settings.paste_last_hotkey.as_ref()?,
     }
@@ -8221,6 +8420,7 @@ fn hotkey_key(key: &str) -> std::result::Result<HotkeyKey, &'static str> {
         "tab" => Some((48, "Tab")),
         "enter" => Some((36, "Return")),
         "backspace" => Some((51, "Delete")),
+        "escape" => Some((53, "Esc")),
         "up" => Some((126, "Up")),
         "down" => Some((125, "Down")),
         "left" => Some((123, "Left")),

@@ -1,8 +1,8 @@
 # HEX
 
 HEX is local-first voice dictation for Apple silicon Macs running macOS 15 or
-newer. Hold a shortcut, speak, and release. HEX transcribes on your Mac and
-pastes the result into the app you are using.
+newer. Use press-and-hold or single-press recording. HEX transcribes on your Mac
+and pastes the result into the app you are using.
 
 [Download the latest signed DMG](https://pub-089d681d41754031a4aefa7017d8c2fb.r2.dev/releases/HEX-latest-arm64.dmg)
 
@@ -29,13 +29,16 @@ Hold **Option**, speak, then release. HEX transcribes and pastes at the current
 focus.
 
 - Double-tap Option to keep recording; press Option again to finish.
-- Press Escape to cancel.
+- Press Escape to cancel. The cancellation shortcut is configurable.
 - Press Option-Shift-V to paste the last completed dictation again.
 
 Settings let you change the shortcut, microphone, language, local model,
 recording behavior, feedback volume, launch-at-login behavior, and Dock
-visibility. Replacements correct names and preferred spellings before text is
-pasted.
+visibility. You can also assign a shortcut to each model, or make one press
+start recording and the next press finish. Japanese supports Parakeet Japanese,
+Qwen3 ASR, SenseVoiceSmall, and Whisper. HEX trims transcripts, capitalizes
+their first letter where applicable, and adds missing terminal punctuation
+before applying replacements.
 
 ## Optional OpenCode Features
 

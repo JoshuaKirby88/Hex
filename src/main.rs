@@ -117,6 +117,8 @@ mod suppression;
 mod text_input;
 #[cfg(target_os = "macos")]
 mod text_replacements;
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+mod transcript_normalization;
 #[cfg(target_os = "macos")]
 mod transcription;
 #[cfg(target_os = "macos")]

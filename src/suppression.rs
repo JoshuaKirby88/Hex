@@ -102,6 +102,18 @@ impl InputEvent {
             }
         )
     }
+
+    pub fn matches_hotkey_press(self, hotkey: Option<RuntimeHotkey>) -> bool {
+        let Self::Key {
+            code,
+            down: true,
+            flags,
+        } = self
+        else {
+            return false;
+        };
+        hotkey.is_some_and(|hotkey| hotkey.matches_key_press(code, flags))
+    }
 }
 
 pub fn physical_modifier_flags() -> u64 {
@@ -476,12 +488,13 @@ unsafe extern "C" fn event_callback(
         .shortcut_suppression
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let suppress =
-        suppression.process_escape(
-            input,
-            delivered,
-            context.escape_cancels.load(Ordering::Acquire),
-        ) || suppression.process_all(input, crate::app_settings::runtime_hotkeys(), delivered);
+    let hotkeys = crate::app_settings::runtime_hotkeys();
+    let suppress = suppression.process_cancel(
+        input,
+        delivered,
+        context.escape_cancels.load(Ordering::Acquire),
+        hotkeys.cancel,
+    ) || suppression.process_all(input, hotkeys, delivered);
     context.activity.observe(input, suppress);
     if suppress { ptr::null_mut() } else { event }
 }
@@ -508,13 +521,13 @@ fn send_input(context: &EventTapContext, event: InputEvent, capture_at: CaptureI
 struct ShortcutSuppression {
     // Repeats and releases keep the original press's suppression decision.
     key_presses: HashMap<u16, bool>,
-    escape_pressed: bool,
+    cancel_pressed: Option<u16>,
 }
 
 impl ShortcutSuppression {
     fn reset(&mut self) {
         self.key_presses.clear();
-        self.escape_pressed = false;
+        self.cancel_pressed = None;
     }
 
     fn process_all(&mut self, input: InputEvent, hotkeys: RuntimeHotkeys, delivered: bool) -> bool {
@@ -531,10 +544,14 @@ impl ShortcutSuppression {
                 flags,
             } => *self.key_presses.entry(code).or_insert_with(|| {
                 delivered
-                    && bindings
+                    && (bindings
                         .iter()
                         .flatten()
                         .any(|hotkey| hotkey.matches_key_press(code, flags))
+                        || hotkeys
+                            .model_dictation
+                            .iter()
+                            .any(|hotkey| hotkey.binding.matches_key_press(code, flags)))
             }),
             InputEvent::Key {
                 code, down: false, ..
@@ -559,6 +576,8 @@ impl ShortcutSuppression {
             input,
             RuntimeHotkeys {
                 dictation: hotkey,
+                cancel: Some(HotkeyBinding::cancel_default().runtime()),
+                model_dictation: Vec::new(),
                 edit: None,
                 paste_last: Some(paste_last),
                 paste_meeting: Some(paste_meeting),
@@ -567,21 +586,28 @@ impl ShortcutSuppression {
         )
     }
 
-    fn process_escape(&mut self, input: InputEvent, delivered: bool, escape_cancels: bool) -> bool {
+    fn process_cancel(
+        &mut self,
+        input: InputEvent,
+        delivered: bool,
+        cancel_enabled: bool,
+        binding: Option<RuntimeHotkey>,
+    ) -> bool {
         match input {
             InputEvent::Key {
-                code: ESCAPE_KEY_CODE,
+                code,
                 down: true,
-                ..
-            } if delivered && escape_cancels => {
-                self.escape_pressed = true;
+                flags,
+            } if delivered
+                && cancel_enabled
+                && binding.is_some_and(|binding| binding.matches_key_press(code, flags)) =>
+            {
+                self.cancel_pressed = Some(code);
                 true
             }
             InputEvent::Key {
-                code: ESCAPE_KEY_CODE,
-                down: false,
-                ..
-            } if std::mem::take(&mut self.escape_pressed) => true,
+                code, down: false, ..
+            } if self.cancel_pressed.take() == Some(code) => true,
             _ => false,
         }
     }
@@ -659,6 +685,7 @@ pub struct DictationHotkey {
     pressed_keys: HashSet<u16>,
     double_tap_enabled: bool,
     double_tap_only: bool,
+    single_press_toggle: bool,
     last_release_at: Option<CaptureInstant>,
     binding: RuntimeHotkey,
     paste_actions_enabled: bool,
@@ -716,6 +743,7 @@ impl DictationHotkey {
             pressed_keys: HashSet::new(),
             double_tap_enabled,
             double_tap_only: false,
+            single_press_toggle: false,
             last_release_at: None,
             binding,
             paste_actions_enabled: true,
@@ -751,6 +779,15 @@ impl DictationHotkey {
                 ))
         {
             self.state = State::Idle;
+        }
+    }
+
+    pub fn set_single_press_toggle(&mut self, enabled: bool) {
+        self.single_press_toggle = enabled;
+        if enabled {
+            self.double_tap_enabled = false;
+            self.double_tap_only = false;
+            self.last_release_at = None;
         }
     }
 
@@ -831,13 +868,10 @@ impl DictationHotkey {
             self.last_release_at = None;
             return Some(action);
         }
-        if matches!(
+        if cancel_action(
             event,
-            InputEvent::Key {
-                code: ESCAPE_KEY_CODE,
-                down: true,
-                ..
-            }
+            fresh_key_down,
+            crate::app_settings::runtime_hotkeys().cancel,
         ) && self.is_recording()
         {
             self.state = State::Dirty;
@@ -923,6 +957,11 @@ impl DictationHotkey {
                 self.last_release_at = None;
                 Some(HotkeyAction::Finish)
             }
+            State::Recording { .. } if self.single_press_toggle && trigger_pressed => {
+                self.state = State::Dirty;
+                self.last_release_at = None;
+                Some(HotkeyAction::Finish)
+            }
             State::Idle if trigger_pressed => {
                 let previous_release = self.last_release_at.take().filter(|released| {
                     self.double_tap_enabled && now.duration_since(*released) < DOUBLE_TAP_WINDOW
@@ -933,6 +972,7 @@ impl DictationHotkey {
                 };
                 Some(HotkeyAction::Start)
             }
+            State::Recording { .. } if self.single_press_toggle && trigger_released => None,
             State::Recording {
                 previous_release: Some(released),
                 ..
@@ -985,6 +1025,26 @@ impl DictationHotkey {
                     && self.pressed_keys.is_empty()
             }
         }
+    }
+}
+
+fn cancel_action(event: InputEvent, fresh_key_down: bool, binding: Option<RuntimeHotkey>) -> bool {
+    let Some(binding) = binding else {
+        return false;
+    };
+    match (binding.key_code, event) {
+        (
+            Some(code),
+            InputEvent::Key {
+                code: input,
+                down: true,
+                flags,
+            },
+        ) => fresh_key_down && code == input && binding.exact_modifiers(flags),
+        (None, InputEvent::Flags(flags)) => {
+            !binding.modifiers.is_empty() && binding.exact_modifiers(flags)
+        }
+        _ => false,
     }
 }
 
@@ -1742,9 +1802,51 @@ mod tests {
             flags: NO_FLAGS,
         };
 
-        assert!(!suppression.process_escape(down, true, false));
-        assert!(suppression.process_escape(down, true, true));
-        assert!(suppression.process_escape(up, true, false));
+        let binding = Some(HotkeyBinding::cancel_default().runtime());
+        assert!(!suppression.process_cancel(down, true, false, binding));
+        assert!(suppression.process_cancel(down, true, true, binding));
+        assert!(suppression.process_cancel(up, true, false, binding));
+    }
+
+    #[test]
+    fn configured_cancel_chord_is_suppressed() {
+        let mut suppression = ShortcutSuppression::default();
+        let binding = Some(RuntimeHotkey {
+            modifiers: crate::app_settings::modifiers_from_flags(OPTION_KEY_MASK),
+            key_code: Some(8),
+        });
+        assert!(suppression.process_cancel(
+            InputEvent::Key {
+                code: 8,
+                down: true,
+                flags: OPTION_KEY_MASK,
+            },
+            true,
+            true,
+            binding,
+        ));
+    }
+
+    #[test]
+    fn single_press_toggle_starts_and_finishes_on_press() {
+        let now = capture_time();
+        let mut hotkey = test_hotkey(false, now);
+        hotkey.set_single_press_toggle(true);
+        assert_eq!(
+            hotkey.process(InputEvent::Flags(OPTION_KEY_MASK), now),
+            Some(HotkeyAction::Start)
+        );
+        assert_eq!(
+            hotkey.process(InputEvent::Flags(NO_FLAGS), now + Duration::from_millis(50)),
+            None
+        );
+        assert_eq!(
+            hotkey.process(
+                InputEvent::Flags(OPTION_KEY_MASK),
+                now + Duration::from_millis(100)
+            ),
+            Some(HotkeyAction::Finish)
+        );
     }
 
     #[test]

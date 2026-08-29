@@ -20,6 +20,7 @@ pub enum TranscriptionModelId {
     ParakeetUnifiedEnglish,
     ParakeetV2,
     ParakeetV3,
+    ParakeetJapanese,
     WhisperLargeV3Turbo,
     Qwen3Asr06B,
     SenseVoiceSmall,
@@ -33,6 +34,7 @@ impl TranscriptionModelId {
             Self::ParakeetUnifiedEnglish => "parakeet_unified_en",
             Self::ParakeetV2 => "parakeet_v2",
             Self::ParakeetV3 => "parakeet_v3",
+            Self::ParakeetJapanese => "parakeet_japanese",
             Self::WhisperLargeV3Turbo => "whisper_large_v3_turbo",
             Self::Qwen3Asr06B => "qwen3_asr06_b",
             Self::SenseVoiceSmall => "sense_voice_small",
@@ -50,6 +52,7 @@ impl FromStr for TranscriptionModelId {
             "parakeet_unified_en" => Ok(Self::ParakeetUnifiedEnglish),
             "parakeet_v2" => Ok(Self::ParakeetV2),
             "parakeet_v3" => Ok(Self::ParakeetV3),
+            "parakeet_japanese" => Ok(Self::ParakeetJapanese),
             "whisper_large_v3_turbo" => Ok(Self::WhisperLargeV3Turbo),
             "qwen3_asr06_b" => Ok(Self::Qwen3Asr06B),
             "sense_voice_small" => Ok(Self::SenseVoiceSmall),
@@ -266,6 +269,15 @@ const PARAKEET_V3_ARTIFACT: GgufArtifact = GgufArtifact {
     architecture: "parakeet",
     variant: "tdt-0.6b-v3",
 };
+const PARAKEET_JAPANESE_ARTIFACT: GgufArtifact = GgufArtifact {
+    filename: "parakeet-tdt-0.6b-ja-q8_0.gguf",
+    revision: "d9e3ba65a6579796389ea89e5939509ed257f972",
+    repository: "cstr/parakeet-tdt-0.6b-ja-GGUF",
+    bytes: 673_554_880,
+    sha256: "5a61e6c7d956c3c72a76fafcd798cac0c9ea66d0e29b3910cd04865a1e42cc17",
+    architecture: "parakeet",
+    variant: "tdt-0.6b-ja",
+};
 const WHISPER_ARTIFACT: GgufArtifact = GgufArtifact {
     filename: "whisper-large-v3-turbo-Q8_0.gguf",
     revision: "d222c9f621c1128299248f2ded4d8a1820519780",
@@ -345,6 +357,21 @@ pub const MODELS: &[ModelDefinition] = &[
         timestamps: "Token timestamps",
         runtime: ModelRuntime::Gguf(&PARAKEET_V3_ARTIFACT),
         languages: PARAKEET_V3_LANGUAGES,
+        accepts_language_hint: true,
+        supports_language_detection: false,
+        supports_recognition_hints: false,
+    },
+    ModelDefinition {
+        id: TranscriptionModelId::ParakeetJapanese,
+        name: "Parakeet Japanese",
+        realtime: "~137x",
+        realtime_context: "published Core ML speed · Apple silicon",
+        quality: "6.4%",
+        quality_context: "JSUT character error rate",
+        coverage: "Japanese",
+        timestamps: "Token timestamps",
+        runtime: ModelRuntime::Gguf(&PARAKEET_JAPANESE_ARTIFACT),
+        languages: &["ja"],
         accepts_language_hint: true,
         supports_language_detection: false,
         supports_recognition_hints: false,
@@ -519,7 +546,25 @@ pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
                 Recommendation::RecognitionHints,
             ),
         ],
-        "zh" | "yue" | "ja" | "ko" => vec![
+        "ja" => vec![
+            choice(
+                TranscriptionModelId::ParakeetJapanese,
+                Recommendation::Recommended,
+            ),
+            choice(
+                TranscriptionModelId::Qwen3Asr06B,
+                Recommendation::Recommended,
+            ),
+            choice(
+                TranscriptionModelId::SenseVoiceSmall,
+                Recommendation::Fastest,
+            ),
+            choice(
+                TranscriptionModelId::WhisperLargeV3Turbo,
+                Recommendation::RecognitionHints,
+            ),
+        ],
+        "zh" | "yue" | "ko" => vec![
             choice(
                 TranscriptionModelId::Qwen3Asr06B,
                 Recommendation::Recommended,
@@ -902,6 +947,7 @@ mod tests {
             ),
             (TranscriptionModelId::ParakeetV2, "parakeet_v2"),
             (TranscriptionModelId::ParakeetV3, "parakeet_v3"),
+            (TranscriptionModelId::ParakeetJapanese, "parakeet_japanese"),
             (
                 TranscriptionModelId::WhisperLargeV3Turbo,
                 "whisper_large_v3_turbo",

@@ -579,10 +579,22 @@ impl DictationWorker {
         protocol: Option<Arc<DictationProtocol>>,
         context: ContextSnapshot,
     ) -> Result<DictationJobId, &'static str> {
+        self.transcribe_with_selection(clip, target, protocol, context, None)
+    }
+
+    pub fn transcribe_with_selection(
+        &self,
+        clip: DictationClip,
+        target: TranscriptionTarget,
+        protocol: Option<Arc<DictationProtocol>>,
+        context: ContextSnapshot,
+        selection: Option<TranscriptionSelection>,
+    ) -> Result<DictationJobId, &'static str> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let job_id = DictationJobId(state.next_output_sequence()?);
         let control = Arc::new(JobControl::default());
-        let (_, selection) = crate::app_settings::transcription_selection();
+        let selection =
+            selection.unwrap_or_else(|| crate::app_settings::transcription_selection().1);
         self.inference_jobs
             .as_ref()
             .ok_or("dictation worker is unavailable")?
@@ -860,7 +872,7 @@ fn record_history(history: &History, target: TranscriptionTarget, completed: &Co
 }
 
 fn prepare_transcript(text: &str, protocol: Option<&DictationProtocol>) -> String {
-    strip_transcript_protocol(text, protocol)
+    crate::transcript_normalization::normalize(&strip_transcript_protocol(text, protocol))
 }
 
 #[cfg(test)]
@@ -869,7 +881,9 @@ fn prepare_transcript_with(
     protocol: Option<&DictationProtocol>,
     replacements: &ReplacementSet,
 ) -> String {
-    replacements.replace(&strip_transcript_protocol(text, protocol))
+    replacements.replace(&crate::transcript_normalization::normalize(
+        &strip_transcript_protocol(text, protocol),
+    ))
 }
 
 fn strip_transcript_protocol(text: &str, protocol: Option<&DictationProtocol>) -> String {

@@ -155,12 +155,14 @@ CoreAudio formats, AppleScript details, or event serialization.
 - The dictation shortcut defaults to Option but supports modifier-only,
   modifier-plus-key, standalone Globe/Fn, and standalone function-key bindings.
   Capturing a new binding suspends global matching.
-- Hold the shortcut to dictate and release to transcribe. Captures shorter than
+- By default, hold the shortcut to dictate and release to transcribe. The
+  optional single-press mode starts on one press and finishes on the next.
+  Per-model shortcuts select their configured model for that capture. Captures shorter than
   300 ms discard. A 450 ms hotkey pre-roll and one-second voice-trigger pre-roll
   protect speech onset. Capture has no automatic duration limit; release,
-  explicit stop, or Escape ends it.
+  explicit stop, or the configured cancellation shortcut ends it.
 - When enabled, a second shortcut tap within 300 ms locks dictation. Press the
-  shortcut again to finish or Escape to cancel.
+  shortcut again to finish or use the configured cancellation shortcut.
 - When commands are enabled, every dictation or paste hotkey action resets
   Moonshine so shortcut audio cannot leak into a later command.
 - Recording audio behavior and idle-sleep prevention begin only after the
@@ -190,7 +192,8 @@ CoreAudio formats, AppleScript details, or event serialization.
 - Completing or pasting an older job must not reconcile or finish a newer
   capture. Shortcut boundaries come from delivered CGEvent timestamps; do not
   fabricate a release timestamp from later physical state.
-- Escape cancels the active capture first, then the newest unfinished dictation.
+- The cancellation shortcut defaults to Escape and cancels the active capture
+  first, then the newest unfinished dictation.
   Cancelled jobs never paste, update the last result, or block later output.
 - Model switches activate only after the pinned artifact is checksum-verified,
   loaded on strict Metal, and prewarmed. A failed switch preserves the active

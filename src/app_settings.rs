@@ -8,11 +8,12 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use serde::{Deserialize, Serialize};
 
-use crate::transcription_models::TranscriptionSelection;
+use crate::transcription_models::{TranscriptionModelId, TranscriptionSelection};
 
 static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
+static SINGLE_PRESS_TOGGLE: AtomicBool = AtomicBool::new(false);
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 static HOTKEYS: OnceLock<RwLock<RuntimeHotkeys>> = OnceLock::new();
@@ -22,6 +23,7 @@ static SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static TRANSCRIPTION_SELECTION: OnceLock<RwLock<RuntimeTranscriptionSelection>> = OnceLock::new();
 static MICROPHONE_SELECTION: OnceLock<RwLock<RuntimeMicrophoneSelection>> = OnceLock::new();
 static VOICE_ACTION_SETTINGS: OnceLock<RwLock<VoiceActionSettings>> = OnceLock::new();
+static MODEL_HOTKEYS: OnceLock<RwLock<Vec<ModelHotkeyBinding>>> = OnceLock::new();
 
 #[derive(Default)]
 struct RuntimeTranscriptionSelection {
@@ -217,6 +219,16 @@ impl Default for HotkeyBinding {
 }
 
 impl HotkeyBinding {
+    pub fn cancel_default() -> Self {
+        Self {
+            modifiers: HotkeyModifiers::default(),
+            key: Some(HotkeyKey {
+                code: 53,
+                label: "Esc".into(),
+            }),
+        }
+    }
+
     pub fn edit_default() -> Self {
         Self {
             modifiers: HotkeyModifiers::option_command(),
@@ -385,8 +397,16 @@ fn side_from_flags(flags: u64, general: u64, left: u64, right: u64) -> Option<Mo
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeModelHotkey {
+    pub model: TranscriptionModelId,
+    pub binding: RuntimeHotkey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeHotkeys {
     pub dictation: RuntimeHotkey,
+    pub cancel: Option<RuntimeHotkey>,
+    pub model_dictation: Vec<RuntimeModelHotkey>,
     pub edit: Option<RuntimeHotkey>,
     pub paste_last: Option<RuntimeHotkey>,
     pub paste_meeting: Option<RuntimeHotkey>,
@@ -396,6 +416,8 @@ impl Default for RuntimeHotkeys {
     fn default() -> Self {
         Self {
             dictation: HotkeyBinding::default().runtime(),
+            cancel: Some(HotkeyBinding::cancel_default().runtime()),
+            model_dictation: Vec::new(),
             edit: None,
             paste_last: Some(HotkeyBinding::paste_last_default().runtime()),
             paste_meeting: crate::DEVELOPER_FEATURES_ENABLED
@@ -480,6 +502,12 @@ pub struct TextReplacement {
     pub output: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ModelHotkeyBinding {
+    pub selection: TranscriptionSelection,
+    pub hotkey: HotkeyBinding,
+}
+
 impl Default for DictationPostProcessing {
     fn default() -> Self {
         Self {
@@ -531,7 +559,10 @@ pub struct AppSettings {
     pub recording_audio_behavior: RecordingAudioBehavior,
     pub double_tap_lock: bool,
     pub double_tap_only: bool,
+    pub single_press_toggle: bool,
     pub dictation_hotkey: HotkeyBinding,
+    pub cancel_hotkey: Option<HotkeyBinding>,
+    pub model_hotkeys: Vec<ModelHotkeyBinding>,
     #[serde(
         default = "HotkeyBinding::edit_default",
         deserialize_with = "deserialize_edit_hotkey"
@@ -566,7 +597,10 @@ impl Default for AppSettings {
             recording_audio_behavior: RecordingAudioBehavior::DoNothing,
             double_tap_lock: true,
             double_tap_only: false,
+            single_press_toggle: false,
             dictation_hotkey: HotkeyBinding::default(),
+            cancel_hotkey: Some(HotkeyBinding::cancel_default()),
+            model_hotkeys: Vec::new(),
             edit_hotkey: HotkeyBinding::edit_default(),
             paste_last_hotkey: Some(HotkeyBinding::paste_last_default()),
             show_dock_icon: true,
@@ -630,6 +664,10 @@ impl AppSettings {
     }
 
     fn normalize_double_tap_settings(&mut self) {
+        if self.single_press_toggle {
+            self.double_tap_lock = false;
+            self.double_tap_only = false;
+        }
         if !self.double_tap_lock || self.dictation_hotkey.key.is_none() {
             self.double_tap_only = false;
         }
@@ -651,6 +689,9 @@ impl AppSettings {
                 settings.migrate_legacy_replacements();
                 let transcription_migrated = settings.migrate_disabled_transcription_model();
                 crate::transcription_models::validate(&settings.transcription)?;
+                for binding in &settings.model_hotkeys {
+                    crate::transcription_models::validate(&binding.selection)?;
+                }
                 settings.repair_hotkey_conflict();
                 if (transcription_migrated || microphone_policy_migrated)
                     && let Err(error) = settings.write_to(path)
@@ -673,6 +714,10 @@ impl AppSettings {
 
     fn write_to(&self, path: &std::path::Path) -> Result<()> {
         self.validate_microphone_policy()?;
+        crate::transcription_models::validate(&self.transcription)?;
+        for binding in &self.model_hotkeys {
+            crate::transcription_models::validate(&binding.selection)?;
+        }
         let parent = path
             .parent()
             .ok_or_else(|| eyre!("settings path has no parent"))?;
@@ -712,6 +757,7 @@ impl AppSettings {
             self.double_tap_lock && self.double_tap_only && self.dictation_hotkey.key.is_some(),
             Ordering::Relaxed,
         );
+        SINGLE_PRESS_TOGGLE.store(self.single_press_toggle, Ordering::Relaxed);
         *HOTKEYS
             .get_or_init(Default::default)
             .write()
@@ -723,6 +769,10 @@ impl AppSettings {
             .get_or_init(Default::default)
             .write()
             .unwrap_or_else(|error| error.into_inner()) = self.voice_action.clone();
+        *MODEL_HOTKEYS
+            .get_or_init(Default::default)
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = self.model_hotkeys.clone();
     }
 
     fn migrate_legacy_replacements(&mut self) {
@@ -760,6 +810,15 @@ impl AppSettings {
     pub fn runtime_hotkeys(&self) -> RuntimeHotkeys {
         RuntimeHotkeys {
             dictation: self.dictation_hotkey.runtime(),
+            cancel: self.cancel_hotkey.as_ref().map(HotkeyBinding::runtime),
+            model_dictation: self
+                .model_hotkeys
+                .iter()
+                .map(|binding| RuntimeModelHotkey {
+                    model: binding.selection.model,
+                    binding: binding.hotkey.runtime(),
+                })
+                .collect(),
             edit: self
                 .voice_action
                 .enabled
@@ -894,15 +953,28 @@ pub fn double_tap_only() -> bool {
     DOUBLE_TAP_ONLY.load(Ordering::Relaxed)
 }
 
+pub fn single_press_toggle() -> bool {
+    SINGLE_PRESS_TOGGLE.load(Ordering::Relaxed)
+}
+
 pub fn runtime_hotkeys() -> RuntimeHotkeys {
-    *HOTKEYS
+    HOTKEYS
         .get_or_init(Default::default)
         .read()
         .unwrap_or_else(|error| error.into_inner())
+        .clone()
 }
 
 pub fn dictation_hotkey() -> RuntimeHotkey {
     runtime_hotkeys().dictation
+}
+
+pub fn model_hotkeys() -> Vec<ModelHotkeyBinding> {
+    MODEL_HOTKEYS
+        .get_or_init(Default::default)
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
 }
 
 pub fn edit_hotkey() -> Option<RuntimeHotkey> {
